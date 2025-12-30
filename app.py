@@ -9,21 +9,57 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
+from sklearn.metrics import mean_absolute_error, r2_score
 
-# 1. ตั้งค่าหน้าเว็บ (ต้องอยู่บรรทัดแรกสุด!)
+# ==========================================================
+# 1. SETUP PAGE CONFIG & SESSION STATE
+# ==========================================================
 st.set_page_config(
-    page_title="Hotel AI System",
+    page_title="Hotel Price Forecasting System",
     page_icon="🏨",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Check Login State
+if 'logged_in' not in st.session_state:
+    st.session_state['logged_in'] = False
+
 # ==========================================================
-# 2. SYSTEM BACKEND (โหลดข้อมูลและโมเดลแค่ครั้งเดียว)
+# 2. LOGIN SYSTEM FUNCTION
+# ==========================================================
+def login_page():
+    st.markdown("""
+        <style>
+            .stTextInput > div > div > input {text-align: center;}
+        </style>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        st.image("https://cdn-icons-png.flaticon.com/512/2933/2933116.png", width=120)
+        st.title("🔒 Login System")
+        st.markdown("ระบบการพยากรณ์ราคาห้องพัก (Hotel Price Forecasting System)")
+        
+        username = st.text_input("Username", placeholder="admin")
+        password = st.text_input("Password", type="password", placeholder="1234")
+        
+        if st.button("เข้าสู่ระบบ (Login)", type="primary", use_container_width=True):
+            if username == "admin" and password == "1234":
+                st.session_state['logged_in'] = True
+                st.rerun()
+            else:
+                st.error("Username หรือ Password ไม่ถูกต้อง")
+        
+        st.divider()
+        st.caption("Hint: user=admin, pass=1234")
+
+# ==========================================================
+# 3. SYSTEM BACKEND (Data & Models)
 # ==========================================================
 @st.cache_resource
 def load_system_engine():
-    # --- Download Data ---
+    # --- A. Download Data ---
     url_main = "https://drive.google.com/uc?id=1dxgKIvSTelLaJvAtBSCMCU5K4FuJvfri"
     url_room = "https://drive.google.com/uc?id=1tMSRSjfHyQT2QfnfqDjm8pw8qjw7bBoM"
     url_holiday = "https://drive.google.com/uc?id=1L-pciKEeRce1gzuhdtpIGcLs0fYHnbZw"
@@ -33,16 +69,20 @@ def load_system_engine():
         gdown.download(url_room, "room_type.csv", quiet=True)
         gdown.download(url_holiday, "thai_holidays.csv", quiet=True)
     
-    # --- Process Data ---
+    # --- B. Process Data ---
     df = pd.read_csv("check_in_report.csv")
     room_type = pd.read_csv("room_type.csv")
     holidays_csv = pd.read_csv("thai_holidays.csv")
     
     if 'Room_Type' in room_type.columns:
         room_type = room_type.rename(columns={'Room_Type': 'Target_Room_Type'})
+    
     df = df.merge(room_type, on='Room', how='left')
     df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
     holidays_csv['Holiday_Date'] = pd.to_datetime(holidays_csv['Holiday_Date'], dayfirst=True, errors='coerce')
+    
+    raw_total_booking = len(df) 
+
     df = df.dropna(subset=['Date'])
     df['Reservation'] = df['Reservation'].fillna('Unknown')
     df['is_holiday'] = df['Date'].isin(holidays_csv['Holiday_Date']).astype(int)
@@ -51,155 +91,229 @@ def load_system_engine():
     df['weekday'] = df['Date'].dt.weekday
     df['Target_Room_Type'] = df['Target_Room_Type'].fillna('Standard Room')
     
-    # --- Train Model ---
+    # --- C. Train Models ---
     le_room = LabelEncoder()
     le_res = LabelEncoder()
     df['RoomType_encoded'] = le_room.fit_transform(df['Target_Room_Type'].astype(str))
     df['Reservation_encoded'] = le_res.fit_transform(df['Reservation'].astype(str))
     
-    X = df[['Night', 'total_guests', 'is_holiday', 'month', 'weekday', 'RoomType_encoded', 'Reservation_encoded']]
+    # Features
+    feature_cols = ['Night', 'total_guests', 'is_holiday', 'month', 'weekday', 'RoomType_encoded', 'Reservation_encoded']
+    X = df[feature_cols]
     y = df['Price']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
+    # Train & Evaluate XGBoost
     xgb = XGBRegressor()
     xgb.fit(X_train, y_train)
+    y_pred_xgb = xgb.predict(X_test)
+    xgb_metrics = {
+        'mae': mean_absolute_error(y_test, y_pred_xgb),
+        'r2': r2_score(y_test, y_pred_xgb)
+    }
     
-    return xgb, le_room, le_res, df
-
-# โหลดระบบ (แสดง Spinner สวยๆ)
-with st.spinner("🚀 Booting AI System..."):
-    model, le_room, le_res, df = load_system_engine()
+    # Train & Evaluate Linear Regression
+    lr = LinearRegression()
+    lr.fit(X_train, y_train)
+    y_pred_lr = lr.predict(X_test)
+    lr_metrics = {
+        'mae': mean_absolute_error(y_test, y_pred_lr),
+        'r2': r2_score(y_test, y_pred_lr)
+    }
+    
+    return xgb, lr, le_room, le_res, df, raw_total_booking, xgb_metrics, lr_metrics, feature_cols
 
 # ==========================================================
-# 3. PAGE FUNCTIONS (สร้างหน้าจอต่างๆ แยกกัน)
+# 4. MAIN APP LOGIC
 # ==========================================================
 
-def show_home_page():
-    st.image("https://images.unsplash.com/photo-1566073771259-6a8506099945?q=80&w=2070&auto=format&fit=crop", use_column_width=True)
-    
-    st.title("Welcome to Hotel AI System 👋")
-    st.markdown("""
-    ### ระบบบริหารจัดการราคาโรงแรมอัจฉริยะ
-    ยินดีต้อนรับเข้าสู่ระบบ Decision Support System สำหรับผู้บริหารโรงแรม
-    
-    **ฟีเจอร์หลักของระบบ:**
-    * **📊 Dashboard Analytics:** วิเคราะห์ข้อมูลย้อนหลัง ดูแนวโน้มราคา และพฤติกรรมลูกค้า
-    * **🤖 Dynamic Pricing AI:** ระบบทำนายราคาที่เหมาะสมแบบ Real-time ด้วย Machine Learning (XGBoost)
-    * **📅 Holiday Integration:** เชื่อมต่อปฏิทินวันหยุดประเทศไทยอัตโนมัติ
-    
-    ---
-    *พัฒนาโดย: [ชื่อของคุณ] | เทคโนโลยี: Python, Streamlit, Scikit-learn*
-    """)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info("👈 เลือกเมนูจากแถบด้านซ้ายเพื่อเริ่มต้นใช้งาน")
-    with col2:
-        st.warning("⚠️ ข้อมูลในระบบเป็นข้อมูลจำลองเพื่อการศึกษา")
+if not st.session_state['logged_in']:
+    login_page()
+else:
+    # Load Data
+    with st.spinner("🚀 กำลังโหลดฐานข้อมูลและโมเดลพยากรณ์..."):
+        xgb_model, lr_model, le_room, le_res, df, total_count, m_xgb, m_lr, f_cols = load_system_engine()
 
-def show_dashboard_page():
-    st.title("📊 Executive Dashboard")
-    st.markdown("วิเคราะห์ภาพรวมผลประกอบการและสถิติการจอง")
-    st.divider()
-
-    # KPI Cards
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Booking ทั้งหมด", f"{len(df):,} รายการ", "View All")
-    c2.metric("ราคาเฉลี่ย (ADR)", f"{df['Price'].mean():,.0f} บาท", "+5% จากเดือนก่อน")
-    c3.metric("รายได้รวม (Total)", f"{df['Price'].sum()/1e6:.2f} ล้านบาท")
-    c4.metric("จำนวนแขกเฉลี่ย", f"{df['total_guests'].mean():.1f} คน/ห้อง")
+    # --- Page Functions ---
     
-    st.divider()
-
-    # Graphs Row 1
-    col_g1, col_g2 = st.columns([2, 1])
-    with col_g1:
-        st.subheader("📈 แนวโน้มราคาตามประเภทห้อง")
-        avg_price_room = df.groupby('Target_Room_Type')['Price'].mean().reset_index().sort_values('Price', ascending=False)
-        fig = px.bar(avg_price_room, x='Price', y='Target_Room_Type', orientation='h', text_auto='.2s', color='Price', color_continuous_scale='Blues')
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col_g2:
-        st.subheader("🍰 แหล่งที่มาลูกค้า")
-        res_count = df['Reservation'].value_counts().reset_index()
-        fig2 = px.pie(res_count, values='count', names='Reservation', hole=0.4)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # Data Table
-    with st.expander("🔎 ดูข้อมูลดิบ (Raw Data)"):
-        st.dataframe(df.sort_values('Date', ascending=False), use_container_width=True)
-
-def show_pricing_page():
-    st.title("🤖 Smart Pricing Engine")
-    st.markdown("ระบบคำนวณราคาห้องพักที่เหมาะสมด้วย AI")
-    
-    # Layout แบบ Card
-    with st.container(border=True):
-        st.subheader("🛠️ กำหนดพารามิเตอร์ (Input Parameters)")
+    def show_home_page():
+        # รูปปก (Cover)
+        if os.path.exists("cover.jpg"):
+            st.image("cover.jpg", use_container_width=True)
+        else:
+            st.image("https://images.unsplash.com/photo-1566073771259-6a8506099945?q=80", use_container_width=True)
         
-        c1, c2, c3 = st.columns(3)
+        st.title("ระบบการพยากรณ์ราคาห้องพัก 👋")
+        st.subheader("(Hotel Price Forecasting System)")
+        st.markdown(f"""
+        ยินดีต้อนรับเข้าสู่ระบบสนับสนุนการตัดสินใจ (Decision Support System) 
+        สำหรับผู้บริหารและฝ่ายจัดการโรงแรม
+        
+        **ความสามารถของระบบ:**
+        * **📊 Data Analytics:** วิเคราะห์ข้อมูลการจองย้อนหลังและสถิติสำคัญ
+        * **🔮 Price Forecasting:** พยากรณ์ราคาที่เหมาะสมด้วยเทคนิค Machine Learning (XGBoost & Linear Regression)
+        * **🧠 Insight Analysis:** วิเคราะห์ปัจจัยที่มีผลต่อการตั้งราคา
+        """)
+        st.info("👈 กรุณาเลือกเมนูจากแถบด้านซ้ายเพื่อเริ่มใช้งาน")
+
+    def show_dashboard_page():
+        st.title("📊 แดชบอร์ดสรุปข้อมูล (Executive Dashboard)")
+        st.markdown("### สรุปภาพรวมผลประกอบการและการวิเคราะห์แนวโน้ม")
+        st.divider()
+        
+        # KPI
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        with kpi1: st.metric("📦 Booking ทั้งหมด", f"{total_count:,} รายการ", "Total Records")
+        with kpi2: st.metric("💰 รายได้รวม", f"{df['Price'].sum()/1e6:.2f} M THB", "Gross Revenue")
+        with kpi3: st.metric("🏷️ ราคาเฉลี่ย (ADR)", f"{df['Price'].mean():,.0f} THB", "Per Night")
+        with kpi4: st.metric("🌙 จำนวนคืนเฉลี่ย", f"{df['Night'].mean():.1f} คืน", "LOS")
+        
+        st.divider()
+        # Charts
+        c1, c2 = st.columns([3, 2])
         with c1:
-            checkin_date = st.date_input("วันที่เช็คอิน", datetime.now())
-            nights = st.number_input("จำนวนคืน", 1, 30, 1)
+            st.markdown("**🏆 ยอดจองแยกตามประเภทห้อง**")
+            rc = df['Target_Room_Type'].value_counts().reset_index()
+            rc.columns = ['Room', 'Count']
+            fig = px.bar(rc, x='Count', y='Room', orientation='h', text='Count', color='Count', color_continuous_scale='Viridis')
+            st.plotly_chart(fig, use_container_width=True)
         with c2:
-            room_name = st.selectbox("ประเภทห้อง", le_room.classes_)
-            guests = st.number_input("จำนวนผู้เข้าพัก", 1, 10, 2)
-        with c3:
-            res_name = st.selectbox("Channel การจอง", le_res.classes_)
-            # แสดงสถานะวันหยุดทันที
-            th_holidays = holidays.Thailand()
-            is_h = checkin_date in th_holidays
-            st.info(f"วันหยุด: {'✅ ใช่' if is_h else '❌ ไม่ใช่'}")
+            st.markdown("**💸 สัดส่วนรายได้**")
+            rev = df.groupby('Target_Room_Type')['Price'].sum().reset_index()
+            fig = px.pie(rev, values='Price', names='Target_Room_Type', hole=0.4)
+            st.plotly_chart(fig, use_container_width=True)
 
-        if st.button("🚀 คำนวณราคา (Predict Price)", type="primary", use_container_width=True):
-            # Calculation
-            r_code = le_room.transform([room_name])[0]
-            res_code = le_res.transform([res_name])[0]
+        st.markdown("**📈 แนวโน้มรายได้รายเดือน**")
+        mt = df.groupby('month')['Price'].sum().reset_index()
+        mt['M_Name'] = mt['month'].apply(lambda x: datetime(2024, x, 1).strftime('%B'))
+        st.plotly_chart(px.area(mt, x='M_Name', y='Price', markers=True, color_discrete_sequence=['#00CC96']), use_container_width=True)
+
+    def show_pricing_page():
+        st.title("🔮 ระบบพยากรณ์ราคา (Price Forecasting)")
+        st.markdown("เปรียบเทียบผลลัพธ์ระหว่าง **XGBoost** และ **Linear Regression**")
+        
+        with st.container(border=True):
+            st.subheader("🛠️ กำหนดตัวแปรสำหรับการพยากรณ์")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                checkin_date = st.date_input("วันที่เช็คอิน", datetime.now())
+                nights = st.number_input("จำนวนคืน", 1, 30, 1)
+            with c2:
+                room_name = st.selectbox("ประเภทห้อง", le_room.classes_)
+                guests = st.number_input("จำนวนผู้เข้าพัก", 1, 10, 2)
+            with c3:
+                res_name = st.selectbox("ช่องทางการจอง", le_res.classes_)
+                is_h = checkin_date in holidays.Thailand()
+                st.info(f"สถานะวันหยุด: {'✅ ใช่' if is_h else '❌ ไม่ใช่'}")
+
+            if st.button("🚀 คำนวณราคาพยากรณ์", type="primary", use_container_width=True):
+                r_code = le_room.transform([room_name])[0]
+                res_code = le_res.transform([res_name])[0]
+                inp = pd.DataFrame([{
+                    'Night': nights, 'total_guests': guests, 'is_holiday': 1 if is_h else 0,
+                    'month': checkin_date.month, 'weekday': checkin_date.weekday(),
+                    'RoomType_encoded': r_code, 'Reservation_encoded': res_code
+                }])
+                
+                p_xgb = xgb_model.predict(inp)[0]
+                p_lr = lr_model.predict(inp)[0]
+                
+                st.divider()
+                cr1, cr2 = st.columns(2)
+                with cr1:
+                    st.success("### ⚡ XGBoost (แนะนำ)")
+                    st.metric("ราคาที่เหมาะสม", f"{p_xgb:,.0f} THB")
+                    st.caption(f"ความคลาดเคลื่อนเฉลี่ย (MAE): ±{m_xgb['mae']:,.0f} บาท")
+                with cr2:
+                    st.warning("### 📉 Linear Regression")
+                    st.metric("ราคาประเมินทั่วไป", f"{p_lr:,.0f} THB")
+                    st.caption(f"ความคลาดเคลื่อนเฉลี่ย (MAE): ±{m_lr['mae']:,.0f} บาท")
+
+    def show_model_insight_page():
+        st.title("🧠 วิเคราะห์ปัจจัยโมเดล (Model Factor Analysis)")
+        st.markdown("ส่วนแสดงผลว่าตัวแปรใดมีอิทธิพลต่อการกำหนดราคามากที่สุด (Feature Importance)")
+        
+        # ดึง Feature Importance จาก XGBoost
+        importance = xgb_model.feature_importances_
+        # แปลงชื่อตัวแปรเป็นภาษาไทยให้เข้าใจง่าย
+        feature_names_th = ['จำนวนคืน', 'จำนวนแขก', 'วันหยุดนักขัตฤกษ์', 'เดือนที่จอง', 'วันในสัปดาห์', 'ประเภทห้องพัก', 'ช่องทางการจอง']
+        
+        fi_df = pd.DataFrame({
+            'Feature': feature_names_th,
+            'Importance': importance
+        }).sort_values('Importance', ascending=True)
+        
+        st.divider()
+        st.subheader("กราฟแสดงน้ำหนักความสำคัญของตัวแปร")
+        fig = px.bar(fi_df, x='Importance', y='Feature', orientation='h', 
+                     title='ปัจจัยที่มีผลต่อราคา (ยิ่งมากยิ่งสำคัญ)',
+                     text_auto='.2%', color='Importance', color_continuous_scale='Sunsetdark')
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.info("""
+        **คำอธิบายกราฟ:**
+        * กราฟนี้แสดงให้เห็นว่าโมเดลใช้ "อะไร" เป็นเกณฑ์หลักในการตัดสินใจราคา
+        * หาก "ประเภทห้องพัก" มีค่าสูง แปลว่าราคาส่วนใหญ่ขึ้นอยู่กับห้องที่เลือก
+        * หาก "วันหยุด" มีค่าสูง แปลว่าช่วงเทศกาลมีการปรับราคาขึ้นลงอย่างชัดเจน
+        """)
+
+    def show_about_page():
+        st.title("ℹ️ เกี่ยวกับระบบ / ผู้จัดทำ")
+        st.divider()
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            # Placeholder รูปโปรไฟล์
+            if os.path.exists("my_profile.jpg"):
+                st.image("my_profile.jpg", caption="ผู้จัดทำ", use_container_width=True)
+            else:
+                st.warning("⚠️ กรุณาอัปโหลดรูปภาพชื่อ my_profile.jpg")
+                st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=200)
+
+        with col2:
+            st.header("ผู้จัดทำ")
+            st.markdown("""
+            **ว่าที่ร้อยตรีพรพินิต วิรัตน์สกุลชัย** สาขาวิทยาการข้อมูล และ นวัตกรรมดิจิทัล  
+            คณะ นวัตกรรม เทคโนโลยีและการสร้างสรรค์  
+            **มหาวิทยาลัยฟาร์อีสเทอร์น**
+            """)
             
-            inp = pd.DataFrame([{
-                'Night': nights, 'total_guests': guests, 'is_holiday': 1 if is_h else 0,
-                'month': checkin_date.month, 'weekday': checkin_date.weekday(),
-                'RoomType_encoded': r_code, 'Reservation_encoded': res_code
-            }])
-            
-            predicted_price = model.predict(inp)[0]
-            
-            # Result Display
             st.divider()
-            result_col1, result_col2 = st.columns([1, 2])
             
-            with result_col1:
-                st.metric(label="ราคาแนะนำ (AI Suggested)", value=f"{predicted_price:,.0f} THB")
-            
-            with result_col2:
-                st.success("✅ คำนวณเสร็จสิ้น! ราคานี้วิเคราะห์จากปัจจัยวันหยุด ฤดูกาล และประเภทห้องพักแล้ว")
-                st.progress(0.85, text="Confidence Score: High")
+            st.header("รายละเอียดโครงการ")
+            st.info("""
+            **โปรแกรมนี้เป็นส่วนหนึ่งของวิทยานิพนธ์เรื่อง** *การพัฒนาระบบสนับสนุนการตัดสินใจเพื่อการพยากรณ์ราคาแบบพลวัตสำหรับธุรกิจโรงแรม โดยใช้ เทคนิคเหมืองข้อมูล*
+            """)
+        
+        st.divider()
+        st.header("📜 กิตติกรรมประกาศ")
+        st.markdown("""
+        *งานวิจัยฉบับนี้สำเร็จลุล่วงได้ด้วยดี เนื่องจากได้รับความอนุเคราะห์ข้อมูลการจองห้องพักย้อนหลังและข้อมูลที่เกี่ยวข้องจากผู้บริหารและพนักงานของโรงแรมกรณีศึกษาในจังหวัดเชียงใหม่ ซึ่งเป็นส่วนสำคัญยิ่งในการพัฒนาและทดสอบแบบจำลองและ ขอขอบพระคุณ ผู้ช่วยศาสตราจารย์ ดร.พงศ์กร จันทราช อาจารย์ที่ปรึกษา ที่ได้กรุณาให้คำปรึกษา แนะนำแนวทาง และตรวจสอบความถูกต้องของงานวิจัยมาโดยตลอด รวมทั้งคณาจารย์ประจำสาขาวิชาวิทยาการข้อมูลและนวัตกรรมดิจิทัล คณะนวัตกรรม เทคโนโลยี และการสร้างสรรค์ มหาวิทยาลัยฟาร์อีสเทอร์น ที่ให้การสนับสนุนทางวิชาการและเอื้อเฟื้อเครื่องมือในการดำเนินงานวิจัยจนประสบผลสำเร็จ*         """)
 
-# ==========================================================
-# 4. MAIN NAVIGATION (ส่วนควบคุมเมนู)
-# ==========================================================
+    # --- SIDEBAR NAVIGATION ---
+    with st.sidebar:
+        st.image("https://cdn-icons-png.flaticon.com/512/2933/2933116.png", width=80)
+        st.markdown(f"### Admin Panel")
+        st.caption(f"User: **admin** | Status: **Online**")
+        
+        selected_page = st.radio("เมนูใช้งาน:", 
+            ["🏠 หน้าหลัก", "📊 แดชบอร์ด", "🔮 พยากรณ์ราคา", "🧠 วิเคราะห์โมเดล", "ℹ️ เกี่ยวกับระบบ"]
+        )
+        
+        st.divider()
+        st.markdown("#### ⚙️ ประสิทธิภาพโมเดล")
+        st.progress(m_xgb['r2'], text=f"XGBoost Score: {m_xgb['r2']*100:.1f}%")
+        st.progress(m_lr['r2'], text=f"Linear Reg Score: {m_lr['r2']*100:.1f}%")
+        
+        st.divider()
+        if st.button("ออกจากระบบ (Logout)", type="secondary"):
+            st.session_state['logged_in'] = False
+            st.rerun()
 
-# สร้าง Sidebar
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2933/2933116.png", width=80)
-    st.markdown("### Hotel Admin")
-    st.write(f"Logged in as: **Manager**")
-    st.write(f"Date: {datetime.now().strftime('%d/%m/%Y')}")
-    st.divider()
-    
-    # เมนูเลือกหน้า
-    selected_page = st.radio(
-        "Navigate to:", 
-        ["🏠 หน้าหลัก (Home)", "📊 แดชบอร์ด (Dashboard)", "🤖 ระบบจัดการราคา (Pricing)"]
-    )
-    
-    st.divider()
-    st.caption("Version 1.0.2 | Powered by Streamlit")
-
-# Logic ในการเปลี่ยนหน้า
-if "หน้าหลัก" in selected_page:
-    show_home_page()
-elif "แดชบอร์ด" in selected_page:
-    show_dashboard_page()
-elif "ระบบจัดการราคา" in selected_page:
-    show_pricing_page()
+    # --- PAGE ROUTER ---
+    if "หน้าหลัก" in selected_page: show_home_page()
+    elif "แดชบอร์ด" in selected_page: show_dashboard_page()
+    elif "พยากรณ์ราคา" in selected_page: show_pricing_page()
+    elif "วิเคราะห์โมเดล" in selected_page: show_model_insight_page()
+    elif "เกี่ยวกับระบบ" in selected_page: show_about_page()
